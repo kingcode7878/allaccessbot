@@ -58,7 +58,7 @@ bot.start(async (ctx) => {
         );
 
         const welcomeData = await settingsCollection.findOne({ key: "welcome_config" });
-        const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Afro Leakers! 🔞`;
+        const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Xclusive Premium! 🔞`;
         const btnText = welcomeData?.button || "WATCH LEAKS 🔞";
 
         await ctx.reply(msgText, {
