@@ -58,7 +58,7 @@ bot.start(async (ctx) => {
         );
         const welcomeData = await settingsCollection.findOne({ key: "welcome_config" });
         await ctx.reply(welcomeData?.text || `Welcome ${ctx.from.first_name}!`, {
-            reply_markup: { inline_keyboard: [[{ text: welcomeData?.button || "ENTER", web_app: { url: APP_URL } }]] }
+            reply_markup: { inline_keyboard: [[{ text: welcomeData?.button || "WATCH LEAKS 🔞", web_app: { url: APP_URL } }]] }
         });
     } catch (err) {
         console.error(`❌ [USER ERROR] Start failed for ${userId}:`, err.message);
