@@ -9,7 +9,6 @@ const MONGO_URI = process.env.MONGO_URI;
 const APP_URL = process.env.APP_URL;
 const PORT = process.env.PORT || 3000;
 
-// MULTI-ADMIN SETUP
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -26,12 +25,11 @@ let broadcastLogsCollection;
 let settingsCollection;
 let isBroadcasting = false; 
 
-// Helper to check if a user is an admin
 const isAdmin = (id) => ADMIN_IDS.includes(id);
 
 // 2. KEEP RENDER ALIVE
 app.get('/', (req, res) => res.send('Afro Bot is Online!'));
-app.listen(PORT, () => console.log(`✅ Web Server: Port ${PORT} opened. Render HTTP probe active.`));
+app.listen(PORT, () => console.log(`✅ Web Server: Port ${PORT} opened.`));
 
 // 3. CONNECT TO DATABASE
 async function connectDB() {
@@ -76,7 +74,7 @@ bot.start(async (ctx) => {
             }
         });
     } catch (err) {
-        console.error(`❌ Start Error for ${userId}:`, err.message);
+        console.error(`❌ Activity: Start Error for ${userId}:`, err.message);
     }
 });
 
@@ -101,10 +99,10 @@ bot.action('admin_stats', async (ctx) => {
         const totalUsers = await usersCollection.countDocuments();
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const activeUsers = await usersCollection.countDocuments({ last_active: { $gte: twentyFourHoursAgo } });
-        console.log(`📊 Stats: Total ${totalUsers}, Active ${activeUsers}.`);
+        console.log(`📊 Activity: Stats requested by ${ctx.from.id}. Total ${totalUsers}, Active ${activeUsers}.`);
         await ctx.answerCbQuery();
         await ctx.reply(`📊 **Stats**\n\nTotal: ${totalUsers}\nActive (24h): ${activeUsers}`);
-    } catch (e) { console.error("❌ Stats Error:", e); }
+    } catch (e) { console.error("❌ Activity: Stats Error:", e); }
 });
 
 bot.action('admin_help', async (ctx) => {
@@ -115,7 +113,7 @@ bot.action('admin_help', async (ctx) => {
 
 bot.action('admin_refresh', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
-    console.log(`🔄 System: Refresh triggered by ${ctx.from.id}`);
+    console.log(`🔄 Activity: Refresh triggered by ${ctx.from.id}`);
     await ctx.answerCbQuery("Refreshing...");
     ctx.reply(isBroadcasting ? "⚠️ System Busy: Broadcast in progress." : "✅ Connection stable.");
 });
@@ -131,14 +129,8 @@ bot.command('setwelcome', async (ctx) => {
         { $set: { text, button } },
         { upsert: true }
     );
-    console.log(`✅ Settings: Welcome message updated by ${ctx.from.id}`);
+    console.log(`✅ Activity: Welcome updated by ${ctx.from.id}`);
     ctx.reply(`✅ Welcome updated!`);
-});
-
-bot.command('stats', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
-    const totalUsers = await usersCollection.countDocuments();
-    ctx.reply(`📊 Total Subscribers: ${totalUsers}`);
 });
 
 bot.command('preview', async (ctx) => {
@@ -161,10 +153,13 @@ bot.command('preview', async (ctx) => {
         } else {
             await ctx.reply(content, extra);
         }
-    } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
+    } catch (e) { 
+        console.error(`❌ Activity: Preview Error by ${ctx.from.id}:`, e.message);
+        ctx.reply(`❌ Preview Error: ${e.message}`); 
+    }
 });
 
-// 6. BROADCAST WITH LIVE LOGGING (SCALABLE CURSOR VERSION)
+// 6. BROADCAST WITH 100% ACTIVITY & ERROR LOGGING
 bot.command('send', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     if (isBroadcasting) return ctx.reply("⚠️ Error: A broadcast is already in progress.");
@@ -186,7 +181,7 @@ bot.command('send', async (ctx) => {
 
     isBroadcasting = true;
     ctx.reply(`🚀 Broadcasting to ${totalUsers} users...`);
-    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${totalUsers} users (Resuming from ${startFrom}).`);
+    console.log(`🚀 Activity: Broadcast started by ${ctx.from.id}. Target: ${totalUsers}. Resuming from: ${startFrom}`);
 
     (async () => {
         const userCursor = usersCollection.find({}).project({ chat_id: 1 }).skip(startFrom);
@@ -195,11 +190,12 @@ bot.command('send', async (ctx) => {
         while (await userCursor.hasNext()) {
             const user = await userCursor.next();
 
+            // LOG EVERY ATTEMPT
             if (count > startFrom && count % 150 === 0) {
-                console.log(`⏳ System: Batch limit reached at ${count}. Pausing for 30s to prevent timeout...`);
+                console.log(`⏳ Activity: Batch pause reached at ${count}. Saving progress...`);
                 await settingsCollection.updateOne({ key: "broadcast_progress" }, { $set: { last_index: count } }, { upsert: true });
                 await new Promise(r => setTimeout(r, 30000));
-                console.log(`▶️ System: Broadcast RESUMING for remaining users.`);
+                console.log(`▶️ Activity: Resume after 30s pause.`);
             }
 
             try {
@@ -212,14 +208,19 @@ bot.command('send', async (ctx) => {
                 }
                 
                 broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
-                count++;
                 
-                if (count % 20 === 0) console.log(`📡 Progress: Sent to ${count}/${totalUsers}`);
+                // LOG SUCCESS
+                count++;
+                console.log(`📡 Activity: [${count}/${totalUsers}] SUCCESS: Sent to ${user.chat_id}`);
+                
                 await new Promise(r => setTimeout(r, 150));
             } catch (err) {
-                console.log(`⚠️ Warning: Failed for ${user.chat_id}. Error: ${err.message}`);
+                // LOG ERROR
+                count++;
+                console.error(`❌ Activity: [${count}/${totalUsers}] FAILED: User ${user.chat_id} | Error: ${err.message}`);
+                
                 if (err.response?.error_code === 403) {
-                    console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
+                    console.log(`🗑 Activity: Removing blocked user ${user.chat_id} from database.`);
                     usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
                 }
             }
@@ -227,18 +228,24 @@ bot.command('send', async (ctx) => {
         
         isBroadcasting = false;
         await settingsCollection.deleteOne({ key: "broadcast_progress" });
-        console.log(`✅ Broadcast: Completed. Total successfully sent: ${count}`);
-        bot.telegram.sendMessage(ctx.from.id, `✅ Sent to ${count} users.`);
+        console.log(`✅ Activity: Broadcast completed. Total processed: ${count}`);
+        bot.telegram.sendMessage(ctx.from.id, `✅ Broadcast complete. Processed ${count} users.`);
     })();
 });
 
 bot.command('deleteall', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     if (isBroadcasting) return ctx.reply("⚠️ Cannot delete while broadcasting.");
-    console.log(`🧹 Cleanup: ${ctx.from.id} triggered /deleteall`);
+    console.log(`🧹 Activity: ${ctx.from.id} triggered /deleteall`);
+    
     const logs = await broadcastLogsCollection.find({ broadcast_id: "last" }).toArray();
     for (const log of logs) {
-        try { await bot.telegram.deleteMessage(log.chat_id, log.message_id); } catch (e) {}
+        try { 
+            await bot.telegram.deleteMessage(log.chat_id, log.message_id); 
+            console.log(`🗑 Activity: Deleted message for ${log.chat_id}`);
+        } catch (e) {
+            console.error(`❌ Activity: Delete failed for ${log.chat_id}: ${e.message}`);
+        }
     }
     await broadcastLogsCollection.deleteMany({ broadcast_id: "last" });
     ctx.reply("✨ Wiped.");
@@ -247,10 +254,16 @@ bot.command('deleteall', async (ctx) => {
 // 8. STARTUP
 connectDB().then(() => {
     bot.launch({ dropPendingUpdates: true });
-    console.log("🚀 Startup: Bot is live and logging activity!");
+    console.log("🚀 Activity: Bot is live and listening for commands.");
 });
 
-process.on('unhandledRejection', (r) => { console.error('🔴 Critical Rejection:', r); isBroadcasting = false; });
-process.on('uncaughtException', (e) => { console.error('🔴 Critical Exception:', e); isBroadcasting = false; });
+process.on('unhandledRejection', (r) => { 
+    console.error('🔴 Activity: Critical Rejection:', r); 
+    isBroadcasting = false; 
+});
+process.on('uncaughtException', (e) => { 
+    console.error('🔴 Activity: Critical Exception:', e); 
+    isBroadcasting = false; 
+});
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
