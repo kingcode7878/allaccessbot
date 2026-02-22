@@ -20,14 +20,16 @@ const client = new MongoClient(MONGO_URI, {
 });
 const app = express();
 
-let usersCollection, broadcastLogsCollection, settingsCollection;
+let usersCollection;
+let broadcastLogsCollection;
+let settingsCollection;
 let isBroadcasting = false; 
 
 const isAdmin = (id) => ADMIN_IDS.includes(id);
 
 // 2. KEEP RENDER ALIVE
-app.get('/', (req, res) => res.send('Afro Bot Engine: ACTIVE'));
-app.listen(PORT, () => console.log(`✅ [SYSTEM] Web Server active on port ${PORT}`));
+app.get('/', (req, res) => res.send('Afro Bot is Online!'));
+app.listen(PORT, () => console.log(`✅ [SERVER] Web Server active on port ${PORT}`));
 
 // 3. CONNECT TO DATABASE
 async function connectDB() {
@@ -37,17 +39,17 @@ async function connectDB() {
         usersCollection = database.collection('users');
         broadcastLogsCollection = database.collection('broadcast_logs');
         settingsCollection = database.collection('settings');
-        console.log("✅ [DATABASE] Connected successfully.");
+        console.log("✅ [DATABASE] Connection successful.");
     } catch (e) {
-        console.error("❌ [DATABASE] Error:", e);
+        console.error("❌ [DATABASE ERROR]:", e);
         setTimeout(connectDB, 5000);
     }
 }
 
-// 4. BOT LOGIC - USER REGISTRATION
+// 4. USER REGISTRATION
 bot.start(async (ctx) => {
     const userId = ctx.chat.id;
-    console.log(`👤 [ACTIVITY] User ${userId} joined.`);
+    console.log(`👤 [ACTIVITY] /start triggered by ${userId}`);
     try {
         await usersCollection.updateOne(
             { chat_id: userId },
@@ -55,19 +57,23 @@ bot.start(async (ctx) => {
             { upsert: true }
         );
         const welcomeData = await settingsCollection.findOne({ key: "welcome_config" });
-        await ctx.reply(welcomeData?.text || `Welcome ${ctx.from.first_name}! 🔞`, {
-            reply_markup: { inline_keyboard: [[{ text: welcomeData?.button || "WATCH", web_app: { url: APP_URL } }]] }
+        await ctx.reply(welcomeData?.text || `Welcome ${ctx.from.first_name}!`, {
+            reply_markup: { inline_keyboard: [[{ text: welcomeData?.button || "ENTER", web_app: { url: APP_URL } }]] }
         });
-    } catch (err) { console.error(`❌ [ERROR] Start for ${userId}:`, err.message); }
+    } catch (err) {
+        console.error(`❌ [USER ERROR] Start failed for ${userId}:`, err.message);
+    }
 });
 
 // 5. ADMIN COMMANDS
 bot.command('admin', (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return;
+    console.log(`🔑 [ADMIN] Access by ${ctx.from.id}`);
     ctx.reply("🛠 **Admin Panel**", {
         reply_markup: {
             inline_keyboard: [
                 [{ text: "📊 View Stats", callback_data: "admin_stats" }],
+                [{ text: "👁 Preview Info", callback_data: "admin_help" }],
                 [{ text: "🔄 Refresh System", callback_data: "admin_refresh" }]
             ]
         }
@@ -77,77 +83,77 @@ bot.command('admin', (ctx) => {
 bot.action('admin_stats', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     const total = await usersCollection.countDocuments();
+    console.log(`📊 [ACTIVITY] Stats requested. Total users: ${total}`);
     await ctx.answerCbQuery();
     await ctx.reply(`📊 Total Users: ${total}`);
 });
 
+bot.action('admin_help', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    await ctx.answerCbQuery();
+    await ctx.reply("📢 /setwelcome | /preview | /send");
+});
+
 bot.action('admin_refresh', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
-    await ctx.answerCbQuery("Refreshing...");
-    ctx.reply(isBroadcasting ? "⚠️ SYSTEM BUSY: BROADCASTING" : "✅ SYSTEM IDLE: READY");
+    console.log(`🔄 [ACTIVITY] Refresh clicked. Broadcast Status: ${isBroadcasting}`);
+    await ctx.answerCbQuery();
+    ctx.reply(isBroadcasting ? "⚠️ BROADCAST RUNNING" : "✅ SYSTEM READY");
 });
 
 bot.command('setwelcome', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return;
     const input = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!input || !input.includes('|')) return ctx.reply("Usage: /setwelcome Text | Button");
+    if (!input.includes('|')) return ctx.reply("Format: Text | Button");
     const [text, button] = input.split('|').map(s => s.trim());
     await settingsCollection.updateOne({ key: "welcome_config" }, { $set: { text, button } }, { upsert: true });
-    ctx.reply(`✅ Welcome updated!`);
+    ctx.reply("✅ Welcome updated.");
 });
 
 bot.command('preview', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return;
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!fullInput) return ctx.reply("Usage: /preview [Msg/URL] | [Button]");
     const [content, btnLabel] = fullInput.split('|').map(s => s.trim());
     const extra = btnLabel ? { reply_markup: { inline_keyboard: [[{ text: btnLabel, web_app: { url: APP_URL } }]] } } : {};
-    const isUrl = content.split(' ')[0].startsWith('http');
+    const args = content.split(' ');
+    const isUrl = args[0].startsWith('http');
     try {
         if (isUrl) {
-            const media = content.split(' ')[0];
-            const cap = content.split(' ').slice(1).join(' ');
-            if (media.match(/\.(mp4|mov|avi)$/i)) await ctx.replyWithVideo(media, { caption: cap, ...extra });
-            else await ctx.replyWithPhoto(media, { caption: cap, ...extra });
+            if (args[0].match(/\.(mp4|mov|avi)$/i)) await ctx.replyWithVideo(args[0], { caption: args.slice(1).join(' '), ...extra });
+            else await ctx.replyWithPhoto(args[0], { caption: args.slice(1).join(' '), ...extra });
         } else { await ctx.reply(content, extra); }
-    } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
+    } catch (e) { console.error(`❌ [PREVIEW ERROR]:`, e.message); ctx.reply(`Error: ${e.message}`); }
 });
 
-// 6. STABILIZED BROADCAST ENGINE
+// 6. REPAIRED BROADCAST ENGINE WITH FULL LOGGING
 bot.command('send', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
-    if (isBroadcasting) return ctx.reply("⚠️ Error: A broadcast is already in progress.");
+    if (!isAdmin(ctx.from.id)) return;
+    if (isBroadcasting) return ctx.reply("⚠️ Already broadcasting!");
 
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!fullInput) return ctx.reply("Usage: /send [Msg/URL] | [Button]");
+    if (!fullInput.includes('|')) return ctx.reply("Format: Content | Button");
 
     const [content, btnLabel] = fullInput.split('|').map(s => s.trim());
     const extra = btnLabel ? { reply_markup: { inline_keyboard: [[{ text: btnLabel, web_app: { url: APP_URL } }]] } } : {};
+    
     const isUrl = content.split(' ')[0].startsWith('http');
     const media = isUrl ? content.split(' ')[0] : null;
     const cap = isUrl ? content.split(' ').slice(1).join(' ') : content;
 
     const totalUsers = await usersCollection.countDocuments();
-    const progressDoc = await settingsCollection.findOne({ key: "broadcast_progress" });
-    const startFrom = progressDoc ? progressDoc.last_index : 0;
-
     isBroadcasting = true;
+    console.log(`🚀 [BROADCAST START] Target: ${totalUsers} users.`);
     ctx.reply(`🚀 Broadcasting to ${totalUsers} users...`);
-    console.log(`🚀 [BROADCAST] Start by ${ctx.from.id}. Target: ${totalUsers}.`);
 
     (async () => {
+        let successCount = 0;
+        let errorCount = 0;
+        const cursor = usersCollection.find({});
+
         try {
-            const userCursor = usersCollection.find({}).project({ chat_id: 1 }).skip(startFrom);
-            let count = startFrom;
-
-            while (await userCursor.hasNext()) {
-                const user = await userCursor.next();
-
-                if (count > startFrom && count % 150 === 0) {
-                    console.log(`⏳ [SYSTEM] Saving progress at index ${count}...`);
-                    await settingsCollection.updateOne({ key: "broadcast_progress" }, { $set: { last_index: count } }, { upsert: true });
-                    await new Promise(r => setTimeout(r, 20000));
-                }
+            while (await cursor.hasNext()) {
+                const user = await cursor.next();
+                console.log(`📡 [ATTEMPT] Sending to ${user.chat_id}...`);
 
                 try {
                     let sent;
@@ -158,48 +164,42 @@ bot.command('send', async (ctx) => {
                         sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
                     }
                     
-                    broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
-                    
-                    // EVERY ACTION LOGGED INDIVIDUALLY
-                    console.log(`📡 [${count + 1}/${totalUsers}] SUCCESS: Sent to ${user.chat_id}`);
+                    successCount++;
+                    console.log(`✅ [SUCCESS] Sent to ${user.chat_id} (${successCount}/${totalUsers})`);
+                    broadcastLogsCollection.insertOne({ chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
                 } catch (err) {
-                    console.error(`❌ [${count + 1}/${totalUsers}] FAILED: User ${user.chat_id} | Error: ${err.message}`);
+                    errorCount++;
+                    console.error(`❌ [SEND ERROR] User ${user.chat_id}: ${err.message}`);
                     if (err.response?.error_code === 403) {
-                        console.log(`🗑 [CLEANUP] Removing blocked user: ${user.chat_id}`);
-                        usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
+                        console.log(`🗑 [DATABASE] Removing blocked user ${user.chat_id}`);
+                        await usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
                     }
                 }
-                count++;
-                // CRITICAL: 100ms breathing room keeps the bot responsive
-                await new Promise(r => setTimeout(r, 100)); 
+
+                // Batch pause logic only triggers if you actually have 150+ users
+                if (successCount + errorCount >= 150 && (successCount + errorCount) % 150 === 0) {
+                    console.log(`⏳ [PAUSE] 150 reached. Sleeping 30s...`);
+                    await new Promise(r => setTimeout(r, 30000));
+                }
+                
+                // 200ms sleep so the bot stays "awake" for other commands
+                await new Promise(r => setTimeout(r, 200));
             }
-            await settingsCollection.deleteOne({ key: "broadcast_progress" });
-            console.log(`✅ [BROADCAST] Finished successfully.`);
         } catch (fatal) {
-            console.error(`🔴 [FATAL] Broadcast loop error:`, fatal.message);
+            console.error(`🔴 [FATAL ERROR] Broadcast crashed:`, fatal.message);
         } finally {
-            // CRITICAL: Unlocks the bot even if the loop fails
-            isBroadcasting = false; 
-            console.log(`🔄 [SYSTEM] Engine Unlocked.`);
-            bot.telegram.sendMessage(ctx.from.id, `✅ Broadcast complete. Processed ${totalUsers} users.`);
+            isBroadcasting = false;
+            console.log(`✅ [BROADCAST FINISHED] Total: ${totalUsers} | Success: ${successCount} | Errors: ${errorCount}`);
+            bot.telegram.sendMessage(ctx.from.id, `✅ Broadcast Done.\nSuccess: ${successCount}\nErrors: ${errorCount}`).catch(()=>{});
         }
     })();
 });
 
-bot.command('deleteall', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
-    if (isBroadcasting) return ctx.reply("⚠️ Cannot delete while broadcasting.");
-    const logs = await broadcastLogsCollection.find({ broadcast_id: "last" }).toArray();
-    for (const log of logs) { try { await bot.telegram.deleteMessage(log.chat_id, log.message_id); } catch (e) {} }
-    await broadcastLogsCollection.deleteMany({ broadcast_id: "last" });
-    ctx.reply("✨ Wiped.");
-});
-
-// 8. STARTUP & GLOBAL LOGGING
+// 7. STARTUP & GLOBAL CATCH
 connectDB().then(() => {
     bot.launch({ dropPendingUpdates: true });
-    console.log("🚀 [SYSTEM] Bot is live and logging 100% activity.");
+    console.log("🚀 [SYSTEM] Bot is live.");
 });
 
-process.on('unhandledRejection', (r) => { console.error('🔴 [CRITICAL] Rejection:', r); isBroadcasting = false; });
-process.on('uncaughtException', (e) => { console.error('🔴 [CRITICAL] Exception:', e); isBroadcasting = false; });
+process.on('unhandledRejection', (e) => console.error('🔴 [REJECTION]:', e));
+process.on('uncaughtException', (e) => console.error('🔴 [EXCEPTION]:', e));
