@@ -13,12 +13,18 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
-const client = new MongoClient(MONGO_URI);
+const client = new MongoClient(MONGO_URI, { 
+    connectTimeoutMS: 60000, 
+    socketTimeoutMS: 60000,
+    maxIdleTimeMS: 120000,
+    maxPoolSize: 10
+});
 const app = express();
 
 let usersCollection;
 let broadcastLogsCollection;
 let settingsCollection;
+let isBroadcasting = false; 
 
 // Helper to check if a user is an admin
 const isAdmin = (id) => ADMIN_IDS.includes(id);
@@ -38,6 +44,7 @@ async function connectDB() {
         console.log("✅ Database: Connected successfully to MongoDB.");
     } catch (e) {
         console.error("❌ Database Error:", e);
+        setTimeout(connectDB, 5000);
     }
 }
 
@@ -110,7 +117,7 @@ bot.action('admin_refresh', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     console.log(`🔄 System: Refresh triggered by ${ctx.from.id}`);
     await ctx.answerCbQuery("Refreshing...");
-    ctx.reply("✅ Connection stable.");
+    ctx.reply(isBroadcasting ? "⚠️ System Busy: Broadcast in progress." : "✅ Connection stable.");
 });
 
 bot.command('setwelcome', async (ctx) => {
@@ -157,9 +164,11 @@ bot.command('preview', async (ctx) => {
     } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. BROADCAST WITH LIVE LOGGING
+// 6. BROADCAST WITH LIVE LOGGING (SCALABLE CURSOR VERSION)
 bot.command('send', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    if (isBroadcasting) return ctx.reply("⚠️ Error: A broadcast is already in progress.");
+
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
     if (!fullInput) return ctx.reply("Usage: /send [Msg/URL] | [Button]");
 
@@ -171,41 +180,61 @@ bot.command('send', async (ctx) => {
     const media = isUrl ? args[0] : null;
     const cap = isUrl ? args.slice(1).join(' ') : content;
 
-    const allUsers = await usersCollection.find({}).toArray();
-    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
-    ctx.reply(`🚀 Broadcasting to ${allUsers.length} users...`);
+    const progressDoc = await settingsCollection.findOne({ key: "broadcast_progress" });
+    const startFrom = progressDoc ? progressDoc.last_index : 0;
+    const totalUsers = await usersCollection.countDocuments();
 
-    let count = 0;
-    for (const user of allUsers) {
-        try {
-            let sent;
-            if (isUrl) {
-                if (media.match(/\.(mp4|mov|avi)$/i)) sent = await bot.telegram.sendVideo(user.chat_id, media, { caption: cap, ...extra });
-                else sent = await bot.telegram.sendPhoto(user.chat_id, media, { caption: cap, ...extra });
-            } else {
-                sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
+    isBroadcasting = true;
+    ctx.reply(`🚀 Broadcasting to ${totalUsers} users...`);
+    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${totalUsers} users (Resuming from ${startFrom}).`);
+
+    (async () => {
+        const userCursor = usersCollection.find({}).project({ chat_id: 1 }).skip(startFrom);
+        let count = startFrom;
+
+        while (await userCursor.hasNext()) {
+            const user = await userCursor.next();
+
+            if (count > startFrom && count % 150 === 0) {
+                console.log(`⏳ System: Batch limit reached at ${count}. Pausing for 30s to prevent timeout...`);
+                await settingsCollection.updateOne({ key: "broadcast_progress" }, { $set: { last_index: count } }, { upsert: true });
+                await new Promise(r => setTimeout(r, 30000));
+                console.log(`▶️ System: Broadcast RESUMING for remaining users.`);
             }
-            await broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() });
-            count++;
-            
-            // Progress Log every 10 users
-            if (count % 10 === 0) console.log(`📡 Progress: Sent to ${count}/${allUsers.length}`);
-            
-            await new Promise(r => setTimeout(r, 50));
-        } catch (err) {
-            console.log(`⚠️ Warning: Failed for ${user.chat_id}. Error: ${err.message}`);
-            if (err.response?.error_code === 403) {
-                console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
-                await usersCollection.deleteOne({ chat_id: user.chat_id });
+
+            try {
+                let sent;
+                if (isUrl) {
+                    if (media.match(/\.(mp4|mov|avi)$/i)) sent = await bot.telegram.sendVideo(user.chat_id, media, { caption: cap, ...extra });
+                    else sent = await bot.telegram.sendPhoto(user.chat_id, media, { caption: cap, ...extra });
+                } else {
+                    sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
+                }
+                
+                broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
+                count++;
+                
+                if (count % 20 === 0) console.log(`📡 Progress: Sent to ${count}/${totalUsers}`);
+                await new Promise(r => setTimeout(r, 150));
+            } catch (err) {
+                console.log(`⚠️ Warning: Failed for ${user.chat_id}. Error: ${err.message}`);
+                if (err.response?.error_code === 403) {
+                    console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
+                    usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
+                }
             }
         }
-    }
-    console.log(`✅ Broadcast: Completed. Total successfully sent: ${count}`);
-    ctx.reply(`✅ Sent to ${count} users.`);
+        
+        isBroadcasting = false;
+        await settingsCollection.deleteOne({ key: "broadcast_progress" });
+        console.log(`✅ Broadcast: Completed. Total successfully sent: ${count}`);
+        bot.telegram.sendMessage(ctx.from.id, `✅ Sent to ${count} users.`);
+    })();
 });
 
 bot.command('deleteall', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    if (isBroadcasting) return ctx.reply("⚠️ Cannot delete while broadcasting.");
     console.log(`🧹 Cleanup: ${ctx.from.id} triggered /deleteall`);
     const logs = await broadcastLogsCollection.find({ broadcast_id: "last" }).toArray();
     for (const log of logs) {
@@ -221,7 +250,7 @@ connectDB().then(() => {
     console.log("🚀 Startup: Bot is live and logging activity!");
 });
 
-process.on('unhandledRejection', (r) => console.error('🔴 Critical Rejection:', r));
-process.on('uncaughtException', (e) => console.error('🔴 Critical Exception:', e));
+process.on('unhandledRejection', (r) => { console.error('🔴 Critical Rejection:', r); isBroadcasting = false; });
+process.on('uncaughtException', (e) => { console.error('🔴 Critical Exception:', e); isBroadcasting = false; });
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
